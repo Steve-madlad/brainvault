@@ -1,12 +1,13 @@
 "use client";
 
-import { Send, Trash2 } from "lucide-react";
+import { Ear, Pause, Play, Send, Square, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type {
   SummarizeApiResponse,
   SummaryContent,
 } from "@/app/lib/summarize-contract";
 import { SUMMARIZE_ERROR_CODES } from "@/app/lib/summarize-contract";
+import { useSummarizeMutation } from "@/app/lib/summarize-api";
 
 const RECENT_SEARCHES_KEY = "summarizer-pro:recent-searches";
 const MAX_RECENT_SEARCHES = 5;
@@ -88,6 +89,19 @@ function isSavedSummary(value: unknown): value is SavedSummary {
   return summary.success === true && summary.error_code === 0 && typeof summary.message === "string";
 }
 
+function isApiFailure(
+  value: unknown,
+): value is Extract<SummarizeApiResponse, { success: false }> {
+  if (typeof value !== "object" || value === null) return false;
+  const error = value as Record<string, unknown>;
+  return (
+    error.success === false &&
+    typeof error.error_code === "number" &&
+    typeof error.message === "string" &&
+    error.content === null
+  );
+}
+
 function parseRecentSearch(value: unknown): RecentSearch | null {
   if (typeof value === "string" && isHttpUrl(value)) {
     return { url: new URL(value).href, summary: null };
@@ -111,14 +125,57 @@ function parseRecentSearch(value: unknown): RecentSearch | null {
   };
 }
 
+function buildSpeechText(summary: SavedSummary): string {
+  const sections = summary.content.sections.map(
+    (section) => `${section.heading}. ${section.body}`,
+  );
+  return [
+    "Overview.",
+    summary.content.overview,
+    ...sections,
+    summary.content.conclusion
+      ? `Conclusion. ${summary.content.conclusion}`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function splitSpeechText(text: string, maxLength = 220) {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  const segments: { text: string; start: number }[] = [];
+  let segment = "";
+  let segmentStart = 0;
+  let position = 0;
+
+  for (const word of normalized.split(" ")) {
+    if (segment && segment.length + word.length + 1 > maxLength) {
+      segments.push({ text: segment, start: segmentStart });
+      segment = "";
+    }
+    if (!segment) segmentStart = position;
+    segment += `${segment ? " " : ""}${word}`;
+    position += word.length + 1;
+  }
+
+  if (segment) segments.push({ text: segment, start: segmentStart });
+  return { text: normalized, segments };
+}
+
 export default function Search() {
   const [webURL, setWebURL] = useState("");
   const [result, setResult] = useState<SummarizeApiResponse | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const [summarize, { isLoading }] = useSummarizeMutation();
   const [loadingMessage, setLoadingMessage] = useState<string | null>(null);
+  const [canSpeak, setCanSpeak] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isSpeechPaused, setIsSpeechPaused] = useState(false);
+  const [speechProgress, setSpeechProgress] = useState(0);
   const [recentSearches, setRecentSearches] = useState<RecentSearch[]>([]);
   const recentSearchesRef = useRef<RecentSearch[]>([]);
   const summaryRef = useRef<HTMLElement | null>(null);
+  const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const speechRunRef = useRef(0);
 
   useEffect(() => {
     try {
@@ -143,6 +200,24 @@ export default function Search() {
       // Ignore invalid or unavailable local storage.
     }
   }, []);
+
+  useEffect(() => {
+    setCanSpeak("speechSynthesis" in window);
+    return () => {
+      speechRunRef.current += 1;
+      window.speechSynthesis?.cancel();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!result) return;
+    speechRunRef.current += 1;
+    window.speechSynthesis?.cancel();
+    utteranceRef.current = null;
+    setIsSpeaking(false);
+    setIsSpeechPaused(false);
+    setSpeechProgress(0);
+  }, [result]);
 
   useEffect(() => {
     if (!isLoading) {
@@ -241,30 +316,100 @@ export default function Search() {
     persistRecentSearches(updatedSearches);
   };
 
+  const startSpeech = () => {
+    if (!result?.success || !canSpeak) return;
+
+    window.speechSynthesis.cancel();
+    const { text, segments } = splitSpeechText(buildSpeechText(result));
+    const runId = ++speechRunRef.current;
+    setSpeechProgress(0);
+    setIsSpeaking(true);
+    setIsSpeechPaused(false);
+
+    const speakSegment = (index: number) => {
+      if (speechRunRef.current !== runId) return;
+      const segment = segments[index];
+      if (!segment) {
+        setSpeechProgress(100);
+        setIsSpeaking(false);
+        setIsSpeechPaused(false);
+        utteranceRef.current = null;
+        return;
+      }
+
+      const utterance = new SpeechSynthesisUtterance(segment.text);
+      utterance.onboundary = (event) => {
+        if (
+          speechRunRef.current === runId &&
+          (event.name === "word" || event.name === "sentence")
+        ) {
+          setSpeechProgress(
+            Math.min(
+              99,
+              Math.round(((segment.start + event.charIndex) / text.length) * 100),
+            ),
+          );
+        }
+      };
+      utterance.onend = () => {
+        if (speechRunRef.current === runId) speakSegment(index + 1);
+      };
+      utterance.onerror = () => {
+        if (speechRunRef.current !== runId) return;
+        setIsSpeaking(false);
+        setIsSpeechPaused(false);
+        utteranceRef.current = null;
+      };
+
+      utteranceRef.current = utterance;
+      window.speechSynthesis.speak(utterance);
+    };
+
+    speakSegment(0);
+  };
+
+  const pauseSpeech = () => {
+    window.speechSynthesis.pause();
+    setIsSpeechPaused(true);
+  };
+
+  const resumeSpeech = () => {
+    window.speechSynthesis.resume();
+    setIsSpeechPaused(false);
+  };
+
+  const stopSpeech = () => {
+    speechRunRef.current += 1;
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+    utteranceRef.current = null;
+    setIsSpeaking(false);
+    setIsSpeechPaused(false);
+    setSpeechProgress(0);
+  };
+
   const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const submittedURL = webURL.trim();
-    setIsLoading(true);
+    stopSpeech();
     setLoadingMessage(null);
     setResult(null);
     rememberSearch(submittedURL);
 
     try {
-      const response = await fetch("/api/summarize", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: encodeURI(submittedURL) }),
-      });
-      const data = (await response.json()) as SummarizeApiResponse;
-
-      if (!response.ok && data.success) {
-        throw new Error("The server returned an unexpected response.");
-      }
-
+      const data = await summarize({ url: submittedURL }).unwrap();
       setResult(data);
       saveSummary(submittedURL, data);
     } catch (error) {
       console.error("Failed to summarize URL:", error);
+      const apiError =
+        typeof error === "object" && error !== null && "data" in error
+          ? (error as { data?: unknown }).data
+          : null;
+      if (isApiFailure(apiError)) {
+        setResult(apiError);
+        saveSummary(submittedURL, apiError);
+        return;
+      }
       setResult({
         success: false,
         error_code: 5000,
@@ -273,7 +418,7 @@ export default function Search() {
         content: null,
       });
     } finally {
-      setIsLoading(false);
+      setLoadingMessage(null);
     }
   };
 
@@ -293,6 +438,7 @@ export default function Search() {
             placeholder="Enter a URL"
             className="url_input peer"
             onChange={(e) => setWebURL(e.target.value)}
+            autoFocus
             required
           />
           <button
@@ -319,17 +465,13 @@ export default function Search() {
                   title={entry.url}
                   disabled={isLoading}
                   onClick={() => {
+                    stopSpeech();
                     setWebURL(entry.url);
                     setResult(entry.summary);
                   }}
                   className="min-w-0 flex-1 truncate rounded-md px-2 py-1 text-left text-sm text-gray-600 hover:bg-gray-100 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {entry.url}
-                  {entry.summary && (
-                    <span className="ml-2 text-xs text-green-700">
-                      Summary saved
-                    </span>
-                  )}
                 </button>
                 <button
                   type="button"
@@ -372,6 +514,71 @@ export default function Search() {
 
             {result.success && (
               <div className="mt-5 space-y-4 text-gray-700">
+                <div className="flex flex-wrap items-center gap-2">
+                  {!isSpeaking ? (
+                    <button
+                      type="button"
+                      onClick={startSpeech}
+                      disabled={!canSpeak}
+                      className="inline-flex items-center gap-2 rounded-md border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                      aria-label="Listen to summary"
+                    >
+                      <Ear size={16} aria-hidden="true" />
+                      Listen
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={isSpeechPaused ? resumeSpeech : pauseSpeech}
+                        className="inline-flex items-center gap-2 rounded-md border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                        aria-label={isSpeechPaused ? "Resume speech" : "Pause speech"}
+                      >
+                        {isSpeechPaused ? (
+                          <Play size={16} aria-hidden="true" />
+                        ) : (
+                          <Pause size={16} aria-hidden="true" />
+                        )}
+                        {isSpeechPaused ? "Resume" : "Pause"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={stopSpeech}
+                        className="inline-flex items-center gap-2 rounded-md border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                        aria-label="Stop speech"
+                      >
+                        <Square size={14} aria-hidden="true" />
+                        Stop
+                      </button>
+                    </>
+                  )}
+                  {(isSpeaking || speechProgress > 0) && (
+                    <div className="flex min-w-40 flex-1 items-center gap-2">
+                      <div
+                        role="progressbar"
+                        aria-label="Speech progress"
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-valuenow={speechProgress}
+                        className="h-2 w-full overflow-hidden rounded-full bg-gray-200"
+                      >
+                        <div
+                          className="h-full rounded-full bg-linear-to-r from-amber-500 via-orange-600 to-yellow-500 transition-[width] duration-200"
+                          style={{ width: `${speechProgress}%` }}
+                        />
+                      </div>
+                      <span className="min-w-10 text-right text-xs text-gray-500">
+                        {speechProgress}%
+                      </span>
+                    </div>
+                  )}
+                  {!canSpeak && (
+                    <span className="text-xs text-gray-500">
+                      Speech playback is unavailable in this browser.
+                    </span>
+                  )}
+                </div>
+
                 <section>
                   <h2 className="font-bold text-gray-900">Overview</h2>
                   <p className="mt-1 whitespace-pre-line">

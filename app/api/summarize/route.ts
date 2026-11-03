@@ -190,8 +190,6 @@ Keep all content fields as clean plain text without Markdown markers. The applic
         },
       });
 
-      console.log({response})
-
       const paywallDetected = response.candidates?.some((candidate) =>
         candidate.urlContextMetadata?.urlMetadata?.some(
           (metadata) =>
@@ -296,12 +294,17 @@ export async function POST(request: Request): Promise<Response> {
     const result = await generateSummary(validation.data.url);
 
     if (!result.success) {
+      const messageByCode: Partial<Record<typeof result.error_code, string>> = {
+        [SUMMARIZE_ERROR_CODES.URL_UNAVAILABLE]:
+          "We couldn't access that page. Check that it is publicly available and try again.",
+        [SUMMARIZE_ERROR_CODES.PAGE_TOO_LARGE]:
+          "That page is too large to summarize. Try a smaller page.",
+        [SUMMARIZE_ERROR_CODES.ACCESS_BLOCKED]:
+          "This page blocks automated access. Try a public page that does not require sign-in.",
+      };
       const message =
-        result.error_code === SUMMARIZE_ERROR_CODES.URL_UNAVAILABLE
-          ? "We couldn't access that page. Check that it is publicly available and try again."
-          : result.error_code === SUMMARIZE_ERROR_CODES.PAGE_TOO_LARGE
-            ? "That page is too large to summarize. Try a smaller page."
-            : "This page blocks automated access. Try a public page that does not require sign-in.";
+        messageByCode[result.error_code] ??
+        "We couldn't process that page. Please try again.";
 
       return errorResponse(
         result.error_code,
@@ -316,8 +319,6 @@ export async function POST(request: Request): Promise<Response> {
       message: "Summary generated successfully.",
       content: result.content,
     };
-
-    console.log({payload});
 
     return Response.json(payload);
   } catch (error) {

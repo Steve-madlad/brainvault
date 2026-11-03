@@ -11,10 +11,10 @@ export default function Home() {
       <h1 className="head_text">
         Summarize Articles With
         <br className="max-md:hidden" />
-        <span className="orange_gradient">Gemini</span>
+        <span className="orange_gradient">Gemini-Flash</span>
       </h1>
       <h2 className="desc">
-        Simplify your reading with Summarize Pro, an open-source article
+        Simplify your reading with Brainvault, an open-source article
         summarizer that transforms lengthy articles into clear and concise
         summaries Demo
       </h2>
