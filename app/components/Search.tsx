@@ -63,23 +63,6 @@ function parseSummaryContent(value: unknown): SummaryContent | null {
     };
   }
 
-  // Migrate URL-only storage entries created before summaries used sections.
-  if (
-    typeof content.overview === "string" &&
-    Array.isArray(content.key_points) &&
-    content.key_points.every((point) => typeof point === "string") &&
-    typeof content.conclusions === "string"
-  ) {
-    const keyPoints = content.key_points as string[];
-    return {
-      overview: content.overview,
-      sections: keyPoints.length
-        ? [{ heading: "Key points", body: keyPoints.join("\n") }]
-        : [],
-      conclusion: content.conclusions,
-    };
-  }
-
   return null;
 }
 
@@ -197,7 +180,6 @@ export default function Search() {
       recentSearchesRef.current = restored;
       setRecentSearches(restored);
     } catch {
-      // Ignore invalid or unavailable local storage.
     }
   }, []);
 
@@ -262,7 +244,6 @@ export default function Search() {
         JSON.stringify(limitedEntries),
       );
     } catch {
-      // Keep the in-memory history available if storage is unavailable.
     }
   };
 

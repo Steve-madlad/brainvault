@@ -122,7 +122,6 @@ const geminiResponseJsonSchema = {
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
 
-// All four models currently have free-tier token pricing and support URL Context.
 const models = [
   "gemini-3.8-flash",
   "gemini-3.5-flash",

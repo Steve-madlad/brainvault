@@ -3,7 +3,6 @@ export const SUMMARIZE_ERROR_CODES = {
   INVALID_JSON: 1001,
   INVALID_URL: 1002,
   URL_UNAVAILABLE: 2001,
-  // Kept for compatibility with earlier responses; non-article pages are now allowed.
   NOT_AN_ARTICLE: 2002,
   PAGE_TOO_LARGE: 2003,
   ACCESS_BLOCKED: 2004,
