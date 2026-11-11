@@ -124,14 +124,22 @@ const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
 
 const models = [
   "gemini-3.8-flash",
+  "gemini-3.6-flash",
   "gemini-3.5-flash",
   "gemini-3.5-flash-lite",
   "gemini-3.1-flash-lite",
+  "gemini-3-flash-preview",
 ];
 
 const transientProviderStatuses = new Set([408, 429, 500, 502, 503, 504]);
 
 class InvalidGeminiResponseError extends Error {}
+
+function getErrorMessage(error: unknown): string | undefined {
+  if (error instanceof Error) {
+    return error.message.slice(0, 300);
+  }
+}
 
 function getProviderStatus(error: unknown): number | undefined {
   if (
@@ -161,6 +169,7 @@ function errorResponse(
 
 async function generateSummary(url: string) {
   let lastTransientError: unknown;
+  let lastUnavailableModelError: unknown;
   let lastBlockedFailure:
     | Extract<z.infer<typeof geminiResponseSchema>, { success: false }>
     | undefined;
@@ -236,16 +245,30 @@ Keep all content fields as clean plain text without Markdown markers. The applic
 
       if (parsed.data.error_code === SUMMARIZE_ERROR_CODES.ACCESS_BLOCKED) {
         lastBlockedFailure = parsed.data;
-        console.warn(`Gemini model ${model} reported blocked page access.`);
+        console.warn(`Gemini model ${model} reported blocked page access.`, {
+          message: parsed.data.message.slice(0, 300),
+        });
         continue;
       }
 
       lastPageFailure = parsed.data;
-      console.warn(`Gemini model ${model} could not access the page.`);
+      console.warn(`Gemini model ${model} could not access the page.`, {
+        errorCode: parsed.data.error_code,
+        message: parsed.data.message.slice(0, 300),
+        urlRetrievalStatuses: response.candidates?.flatMap(
+          (candidate) =>
+            candidate.urlContextMetadata?.urlMetadata?.map(
+              (metadata) => metadata.urlRetrievalStatus,
+            ) ?? [],
+        ),
+      });
       continue;
     } catch (error) {
       if (error instanceof InvalidGeminiResponseError) {
-        console.warn(`Gemini model ${model} returned an invalid summary response.`);
+        console.warn(
+          `Gemini model ${model} returned an invalid summary response.`,
+          { message: error.message },
+        );
         continue;
       }
 
@@ -254,7 +277,16 @@ Keep all content fields as clean plain text without Markdown markers. The applic
         lastTransientError = error;
         console.warn(
           `Gemini model ${model} is temporarily unavailable (${status}).`,
+          { message: getErrorMessage(error) },
         );
+        continue;
+      }
+
+      if (status === 404) {
+        lastUnavailableModelError = error;
+        console.warn(`Gemini model ${model} is unavailable (${status}).`, {
+          message: getErrorMessage(error),
+        });
         continue;
       }
 
@@ -264,6 +296,7 @@ Keep all content fields as clean plain text without Markdown markers. The applic
 
   if (lastBlockedFailure) return lastBlockedFailure;
   if (lastTransientError) throw lastTransientError;
+  if (lastUnavailableModelError) throw lastUnavailableModelError;
   if (lastPageFailure) return lastPageFailure;
   throw new Error("No configured Gemini model was available.");
 }
@@ -346,7 +379,10 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
-    console.error("Summarization request failed.", { providerStatus });
+    console.error("Summarization request failed.", {
+      providerStatus,
+      providerMessage: getErrorMessage(error),
+    });
     return errorResponse(
       SUMMARIZE_ERROR_CODES.INTERNAL_ERROR,
       "We couldn't summarize that page right now. Please try again.",
